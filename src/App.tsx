@@ -13,6 +13,7 @@ import {
 } from './types';
 import { createSampleDocument, createInitialAnnotations } from './utils/sampleData';
 import { exportDocumentAsPDF, downloadBlob, exportPageToCanvas } from './utils/exportUtils';
+import { loadPDFDocument } from './utils/pdfLoader';
 import { MenuBar } from './components/MenuBar';
 import { WindowHeader } from './components/WindowHeader';
 import { MarkupToolbar } from './components/MarkupToolbar';
@@ -360,59 +361,25 @@ export const App: React.FC = () => {
     fileInputRef.current?.click();
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      const file = e.target.files[0];
-      const reader = new FileReader();
-
-      if (file.type.startsWith('image/')) {
-        reader.onload = (loadEvent) => {
-          const dataUrl = loadEvent.target?.result as string;
-          const img = new Image();
-          img.onload = () => {
-            setDoc({
-              id: `doc-${Date.now()}`,
-              filename: file.name,
-              fileType: 'image',
-              fileSize: file.size,
-              lastModified: file.lastModified,
-              pageCount: 1,
-              pages: [
-                {
-                  index: 0,
-                  width: img.width,
-                  height: img.height,
-                  title: file.name,
-                  canvasImage: dataUrl,
-                },
-              ],
-            });
-            setCurrentPage(0);
-            setAnnotations([]);
-            setHistory([]);
-            setFuture([]);
-            setIsModified(false);
-          };
-          img.src = dataUrl;
-        };
-        reader.readAsDataURL(file);
-      } else {
-        // If loaded PDF or other, generate pages or alert
-        reader.onload = (loadEvent) => {
-          const dataUrl = loadEvent.target?.result as string;
+  const processLoadedFile = async (data: ArrayBuffer | string, filename: string, fileSize: number, isImage: boolean) => {
+    try {
+      if (isImage) {
+        const dataUrl = typeof data === 'string' ? data : '';
+        const img = new Image();
+        img.onload = () => {
           setDoc({
             id: `doc-${Date.now()}`,
-            filename: file.name,
-            fileType: 'pdf',
-            fileSize: file.size,
-            lastModified: file.lastModified,
+            filename,
+            fileType: 'image',
+            fileSize,
+            lastModified: Date.now(),
             pageCount: 1,
             pages: [
               {
                 index: 0,
-                width: 640,
-                height: 900,
-                title: file.name,
+                width: img.width,
+                height: img.height,
+                title: filename,
                 canvasImage: dataUrl,
               },
             ],
@@ -423,11 +390,65 @@ export const App: React.FC = () => {
           setFuture([]);
           setIsModified(false);
         };
+        img.src = dataUrl;
+      } else {
+        // PDF document
+        const buffer = typeof data === 'string' ? Uint8Array.from(atob(data.split(',')[1] || data), c => c.charCodeAt(0)).buffer : data;
+        const loadedPdf = await loadPDFDocument(buffer, filename, fileSize);
+        setDoc(loadedPdf);
+        setCurrentPage(0);
+        setAnnotations([]);
+        setHistory([]);
+        setFuture([]);
+        setIsModified(false);
+      }
+    } catch (err) {
+      console.error('Failed to load file:', err);
+    }
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      const file = e.target.files[0];
+      const isImg = file.type.startsWith('image/');
+      if (isImg) {
+        const reader = new FileReader();
+        reader.onload = (loadEvent) => {
+          processLoadedFile(loadEvent.target?.result as string, file.name, file.size, true);
+        };
         reader.readAsDataURL(file);
+      } else {
+        const reader = new FileReader();
+        reader.onload = (loadEvent) => {
+          processLoadedFile(loadEvent.target?.result as ArrayBuffer, file.name, file.size, false);
+        };
+        reader.readAsArrayBuffer(file);
       }
       e.target.value = '';
     }
   };
+
+  // Expose bridge for macOS Xcode native app wrapper
+  useEffect(() => {
+    (window as any).openNativeFile = (dataUrlOrBase64: string, filename: string, mimeType?: string) => {
+      const isImg = (mimeType && mimeType.startsWith('image/')) || /\.(png|jpe?g|webp)$/i.test(filename);
+      processLoadedFile(dataUrlOrBase64, filename, dataUrlOrBase64.length, isImg);
+    };
+
+    (window as any).exportNativePDF = () => {
+      handleSavePDF();
+    };
+
+    (window as any).triggerNativeOpenFile = () => {
+      handleOpenFileClick();
+    };
+
+    return () => {
+      delete (window as any).openNativeFile;
+      delete (window as any).exportNativePDF;
+      delete (window as any).triggerNativeOpenFile;
+    };
+  }, [doc, annotations, currentPage]);
 
   // Rotate Document Page
   const handleRotateRight = () => {

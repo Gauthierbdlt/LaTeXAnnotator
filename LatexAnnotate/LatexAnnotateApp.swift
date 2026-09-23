@@ -7,9 +7,19 @@ struct LatexAnnotateApp: App {
             ContentView()
         }
         .windowStyle(.titleBar)
-        .windowToolbarStyle(.unified)
+        .windowToolbarStyle(.unifiedCompact)
         .commands {
-            SidebarCommands()
+            CommandGroup(replacing: .newItem) {
+                Button("Ouvrir un document...") {
+                    NotificationCenter.default.post(name: .openFileRequested, object: nil)
+                }
+                .keyboardShortcut("o", modifiers: .command)
+                
+                Button("Exporter en PDF annoté...") {
+                    NotificationCenter.default.post(name: .exportPDFRequested, object: nil)
+                }
+                .keyboardShortcut("e", modifiers: .command)
+            }
         }
     }
 }

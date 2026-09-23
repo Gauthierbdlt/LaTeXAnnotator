@@ -1,247 +1,198 @@
 import SwiftUI
-import PDFKit
+import WebKit
 import UniformTypeIdentifiers
 
-/// Interface principale macOS clone d'Aperçu (Preview) avec barre d'annotation et support LaTeX/Image
-public struct ContentView: View {
-    @State private var document: PDFDocument?
-    @State private var activeTool: AnnotationTool = .select
-    @State private var currentPageIndex: Int = 0
-    @State private var isSidebarVisible: Bool = true
-    @State private var isMarkupVisible: Bool = true
-    @State private var isInspectorVisible: Bool = false
+struct ContentView: View {
+    @StateObject private var webViewStore = WebViewStore()
+    @State private var isTargetedForDrop = false
     
-    // État de l'éditeur de formule LaTeX
-    @State private var showLatexEditor: Bool = false
-    @State private var latexInput: String = "\\int_{a}^{b} f(x) \\, dx = F(b) - F(a)"
-    @State private var latexFontSize: CGFloat = 22.0
-    @State private var editingAnnotation: LaTeXAnnotation? = nil
-    @State private var isRenderingLatex: Bool = false
-    @State private var latexErrorMessage: String? = nil
-    
-    public init() {}
-    
-    public var body: some View {
-        NavigationSplitView {
-            if isSidebarVisible {
-                PageSidebarView(document: document, currentPageIndex: $currentPageIndex)
-            }
-        } detail: {
-            VStack(spacing: 0) {
-                // Barre d'outils d'annotation style Aperçu
-                if isMarkupVisible {
-                    MarkupToolbarView(
-                        activeTool: $activeTool,
-                        onOpenLatex: {
-                            editingAnnotation = nil
-                            showLatexEditor = true
-                        },
-                        onPasteImage: {
-                            pasteImageFromClipboard()
+    var body: some View {
+        ZStack {
+            // Fond sombre natif macOS correspondant à la palette d'Aperçu
+            Color(red: 0.11, green: 0.11, blue: 0.13)
+                .ignoresSafeArea()
+            
+            // WebView affichant la version complète de l'application
+            MacWebView(store: webViewStore)
+                .ignoresSafeArea()
+            
+            // Indicateur visuel lors du glisser-déposer de PDF / image
+            if isTargetedForDrop {
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(Color.blue, lineWidth: 3)
+                    .background(Color.blue.opacity(0.12))
+                    .overlay(
+                        VStack(spacing: 8) {
+                            Image(systemName: "doc.badge.plus")
+                                .font(.system(size: 44))
+                                .foregroundColor(.blue)
+                            Text("Déposez votre PDF ou image pour l'ouvrir")
+                                .font(.headline)
+                                .foregroundColor(.white)
                         }
                     )
-                }
-                
-                // Visionneuse PDF principale
-                PDFKitView(
-                    document: $document,
-                    activeTool: $activeTool,
-                    onLaTeXEditRequested: { annot in
-                        editingAnnotation = annot
-                        latexInput = annot.latexCode
-                        latexFontSize = annot.fontSize
-                        showLatexEditor = true
-                    }
-                )
+                    .ignoresSafeArea()
             }
+        }
+        .frame(minWidth: 900, minHeight: 650)
+        .onDrop(of: [.pdf, .image, .fileURL], isTargeted: $isTargetedForDrop) { providers in
+            handleDrop(providers: providers)
         }
         .toolbar {
-            // Bouton Barre latérale
-            ToolbarItem(placement: .navigation) {
-                Button(action: { isSidebarVisible.toggle() }) {
-                    Image(systemName: "sidebar.leading")
-                }
-                .help("Afficher ou masquer la barre latérale")
-            }
-            
-            // Titre du document
-            ToolbarItem(placement: .principal) {
-                VStack(spacing: 2) {
-                    Text(document?.documentURL?.lastPathComponent ?? "Sans titre.pdf")
-                        .font(.system(size: 13, weight: .semibold))
-                    if let doc = document {
-                        Text("Page \(currentPageIndex + 1) sur \(doc.pageCount)")
-                            .font(.system(size: 10))
-                            .foregroundColor(.secondary)
-                    }
-                }
-            }
-            
-            // Outil Annoter & Inspecteur
             ToolbarItemGroup(placement: .primaryAction) {
-                Button(action: { isMarkupVisible.toggle() }) {
-                    Image(systemName: isMarkupVisible ? "pencil.tip.crop.circle.fill" : "pencil.tip.crop.circle")
+                Button(action: {
+                    openFilePicker()
+                }) {
+                    Label("Ouvrir un fichier", systemImage: "doc.badge.plus")
                 }
-                .help("Barre d'outils d'annotation")
+                .help("Ouvrir un PDF ou une image (⌘O)")
+                .keyboardShortcut("o", modifiers: .command)
                 
-                Button(action: { isInspectorVisible.toggle() }) {
-                    Image(systemName: "info.circle")
+                Button(action: {
+                    webViewStore.exportPDF()
+                }) {
+                    Label("Exporter PDF", systemImage: "square.and.arrow.up")
                 }
-                .help("Afficher l'inspecteur (⌘I)")
+                .help("Exporter le document avec annotations (⌘E)")
+                .keyboardShortcut("e", modifiers: .command)
+                
+                Button(action: {
+                    webViewStore.reload()
+                }) {
+                    Label("Actualiser", systemImage: "arrow.clockwise")
+                }
+                .help("Actualiser l'application (⌘R)")
+                .keyboardShortcut("r", modifiers: .command)
             }
         }
-        .sheet(isPresented: $showLatexEditor) {
-            LatexEditorSheet(
-                latexCode: $latexInput,
-                fontSize: $latexFontSize,
-                errorMessage: $latexErrorMessage,
-                onCancel: { showLatexEditor = false },
-                onConfirm: {
-                    insertOrUpdateLatex()
-                    showLatexEditor = false
-                }
-            )
+        .onReceive(NotificationCenter.default.publisher(for: .openFileRequested)) { _ in
+            openFilePicker()
         }
-        .onAppear {
-            loadDefaultDocument()
+        .onReceive(NotificationCenter.default.publisher(for: .exportPDFRequested)) { _ in
+            webViewStore.exportPDF()
         }
     }
     
-    private func loadDefaultDocument() {
-        if let url = Bundle.main.url(forResource: "sample", withExtension: "pdf") {
-            self.document = PDFDocument(url: url)
-        }
-    }
-    
-    private func pasteImageFromClipboard() {
-        let pb = NSPasteboard.general
-        if let image = NSImage(pasteboard: pb) {
-            // Transmis via la vue annotable
-        }
-    }
-    
-    private func insertOrUpdateLatex() {
-        isRenderingLatex = true
-        latexErrorMessage = nil
+    // Dialogue natif macOS pour ouvrir un fichier (PDF ou image)
+    private func openFilePicker() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canCreateDirectories = false
+        panel.allowedContentTypes = [.pdf, .png, .jpeg, .image]
+        panel.message = "Sélectionnez un document PDF ou une image à annoter"
+        panel.prompt = "Ouvrir"
         
-        LaTeXRenderer.shared.render(latex: latexInput) { result in
-            DispatchQueue.main.async {
-                self.isRenderingLatex = false
-                switch result {
-                case .success(let renderedImage):
-                    if let existing = self.editingAnnotation {
-                        existing.latexCode = self.latexInput
-                        existing.fontSize = self.latexFontSize
-                        existing.renderedImage = renderedImage
-                    } else if let doc = self.document, let page = doc.page(at: self.currentPageIndex) {
-                        let pageBounds = page.bounds(for: .cropBox)
-                        let w = renderedImage.size.width
-                        let h = renderedImage.size.height
-                        let bounds = CGRect(
-                            x: (pageBounds.width - w) / 2,
-                            y: (pageBounds.height - h) / 2,
-                            width: w,
-                            height: h
-                        )
-                        let annot = LaTeXAnnotation(bounds: bounds, latex: self.latexInput, renderedImage: renderedImage)
-                        annot.fontSize = self.latexFontSize
-                        page.addAnnotation(annot)
-                    }
-                case .failure(let err):
-                    self.latexErrorMessage = err.localizedDescription
+        if panel.runModal() == .OK, let url = panel.url {
+            loadFile(from: url)
+        }
+    }
+    
+    private func handleDrop(providers: [NSItemProvider]) -> Bool {
+        guard let provider = providers.first else { return false }
+        
+        provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, error in
+            if let data = item as? Data, let url = URL(dataRepresentation: data, relativeTo: nil) {
+                DispatchQueue.main.async {
+                    self.loadFile(from: url)
+                }
+            } else if let url = item as? URL {
+                DispatchQueue.main.async {
+                    self.loadFile(from: url)
                 }
             }
         }
+        return true
+    }
+    
+    private func loadFile(from url: URL) {
+        guard let data = try? Data(contentsOf: url) else { return }
+        let base64 = data.base64EncodedString()
+        let filename = url.lastPathComponent
+        let isPDF = url.pathExtension.lowercased() == "pdf"
+        let mimeType = isPDF ? "application/pdf" : "image/\(url.pathExtension.lowercased())"
+        let dataUrl = "data:\(mimeType);base64,\(base64)"
+        
+        webViewStore.openFileInWeb(dataUrl: dataUrl, filename: filename, mimeType: mimeType)
     }
 }
 
-/// Barre d'outils d'annotation native macOS
-private struct MarkupToolbarView: View {
-    @Binding var activeTool: AnnotationTool
-    var onOpenLatex: () -> Void
-    var onPasteImage: () -> Void
+// Notification keys pour le menu système macOS
+extension Notification.Name {
+    static let openFileRequested = Notification.Name("openFileRequested")
+    static let exportPDFRequested = Notification.Name("exportPDFRequested")
+}
+
+// Store pour communiquer avec la WKWebView
+class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKScriptMessageHandler {
+    var webView: WKWebView?
     
-    var body: some View {
-        HStack(spacing: 8) {
-            Picker("Outil", selection: $activeTool) {
-                ForEach(AnnotationTool.allCases) { tool in
-                    Image(systemName: tool.iconName).tag(tool)
-                }
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 320)
-            
-            Divider()
-                .frame(height: 18)
-            
-            // Bouton direct pour l'annotation LaTeX
-            Button(action: onOpenLatex) {
-                HStack(spacing: 4) {
-                    Text("√x").italic().bold()
-                    Text("Formule LaTeX")
-                }
-                .font(.system(size: 11, weight: .medium))
-            }
-            
-            // Bouton direct pour coller une image
-            Button(action: onPasteImage) {
-                HStack(spacing: 4) {
-                    Image(systemName: "photo.badge.plus")
-                    Text("Coller Image")
-                }
-                .font(.system(size: 11, weight: .medium))
-            }
-            
-            Spacer()
+    func setupWebView() -> WKWebView {
+        let config = WKWebViewConfiguration()
+        let contentController = WKUserContentController()
+        contentController.add(self, name: "nativeApp")
+        config.userContentController = contentController
+        config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
+        
+        let wv = WKWebView(frame: .zero, configuration: config)
+        wv.navigationDelegate = self
+        wv.setValue(false, forKey: "drawsBackground") // fond transparent sans flash blanc
+        self.webView = wv
+        
+        loadApp()
+        return wv
+    }
+    
+    func loadApp() {
+        guard let webView = webView else { return }
+        
+        // 1. Essai de chargement du bundle local dist/index.html inclus dans l'app
+        if let bundleUrl = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "dist") {
+            let distFolder = bundleUrl.deletingLastPathComponent()
+            webView.loadFileURL(bundleUrl, allowingReadAccessTo: distFolder)
+            return
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(Color(NSColor.windowBackgroundColor))
-        .border(Color(NSColor.separatorColor), width: 0.5)
+        
+        // 2. Recherche récursive du fichier index.html dans le Bundle
+        if let fallbackUrl = Bundle.main.url(forResource: "index", withExtension: "html") {
+            let parentFolder = fallbackUrl.deletingLastPathComponent()
+            webView.loadFileURL(fallbackUrl, allowingReadAccessTo: parentFolder)
+            return
+        }
+        
+        // 3. Mode développement : connexion au serveur local si actif
+        if let localDevUrl = URL(string: "http://localhost:3000") {
+            webView.load(URLRequest(url: localDevUrl))
+        }
+    }
+    
+    func reload() {
+        webView?.reload()
+    }
+    
+    func openFileInWeb(dataUrl: String, filename: String, mimeType: String) {
+        let script = "if (window.openNativeFile) { window.openNativeFile('\(dataUrl)', '\(filename)', '\(mimeType)'); }"
+        webView?.evaluateJavaScript(script, completionHandler: nil)
+    }
+    
+    func exportPDF() {
+        let script = "if (window.exportNativePDF) { window.exportNativePDF(); }"
+        webView?.evaluateJavaScript(script, completionHandler: nil)
+    }
+    
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        // Communication de la WebApp vers macOS
+        print("Message reçu de l'app web:", message.body)
     }
 }
 
-/// Fenêtre modale / Popover pour l'édition de LaTeX
-private struct LatexEditorSheet: View {
-    @Binding var latexCode: String
-    @Binding var fontSize: CGFloat
-    @Binding var errorMessage: String?
-    var onCancel: () -> Void
-    var onConfirm: () -> Void
+// Wrapper SwiftUI pour WKWebView AppKit
+struct MacWebView: NSViewRepresentable {
+    @ObservedObject var store: WebViewStore
     
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Insérer une formule LaTeX")
-                .font(.headline)
-            
-            TextEditor(text: $latexCode)
-                .font(.system(.body, design: .monospaced))
-                .frame(height: 80)
-                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.gray.opacity(0.4), lineWidth: 1))
-            
-            if let error = errorMessage {
-                HStack {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundColor(.red)
-                    Text(error)
-                        .font(.caption)
-                        .foregroundColor(.red)
-                }
-            }
-            
-            HStack {
-                Text("Taille : \(Int(fontSize)) pt")
-                Slider(value: $fontSize, in: 12...48, step: 1)
-            }
-            
-            HStack {
-                Spacer()
-                Button("Annuler", action: onCancel)
-                Button("Insérer", action: onConfirm)
-                    .buttonStyle(.borderedProminent)
-            }
-        }
-        .padding(18)
-        .frame(width: 440)
+    func makeNSView(context: Context) -> WKWebView {
+        return store.setupWebView()
     }
+    
+    func updateNSView(_ nsView: WKWebView, context: Context) {}
 }
