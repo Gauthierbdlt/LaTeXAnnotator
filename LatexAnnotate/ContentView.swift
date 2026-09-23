@@ -9,11 +9,11 @@ struct ContentView: View {
     
     var body: some View {
         ZStack {
-            // Fond sombre macOS correspondant à l'interface d'Aperçu (#242426)
+            // Fond sombre macOS identique à l'interface d'Aperçu (#242426)
             Color(red: 0.14, green: 0.14, blue: 0.15)
                 .ignoresSafeArea()
             
-            // WebView intégrée affichant la version complète de l'application
+            // Vue WebKit intégrée avec communication native bidirectionnelle
             MacWebView(store: webViewStore)
                 .ignoresSafeArea()
             
@@ -21,11 +21,11 @@ struct ContentView: View {
             if isTargetedForDrop {
                 RoundedRectangle(cornerRadius: 12)
                     .stroke(Color.blue, lineWidth: 3)
-                    .background(Color.blue.opacity(0.18))
+                    .background(Color.blue.opacity(0.2))
                     .overlay(
                         VStack(spacing: 12) {
                             Image(systemName: "doc.badge.plus")
-                                .font(.system(size: 52))
+                                .font(.system(size: 54))
                                 .foregroundColor(.blue)
                             Text("Déposez votre document PDF ou image ici")
                                 .font(.title2.bold())
@@ -38,18 +38,18 @@ struct ContentView: View {
                     .ignoresSafeArea()
             }
         }
-        .frame(minWidth: 980, minHeight: 700)
+        .frame(minWidth: 1000, minHeight: 720)
         .onDrop(of: [.pdf, .image, .fileURL], isTargeted: $isTargetedForDrop) { providers in
             handleDrop(providers: providers)
         }
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button(action: {
-                    webViewStore.triggerOpenFile()
+                    openFilePicker()
                 }) {
                     Label("Ouvrir un document", systemImage: "folder")
                 }
-                .help("Ouvrir un fichier PDF ou image (⌘O)")
+                .help("Ouvrir un fichier PDF ou image depuis votre Mac (⌘O)")
                 .keyboardShortcut("o", modifiers: .command)
                 
                 Button(action: {
@@ -57,7 +57,7 @@ struct ContentView: View {
                 }) {
                     Label("Exporter PDF", systemImage: "square.and.arrow.up")
                 }
-                .help("Exporter le document avec annotations (⌘E)")
+                .help("Exporter le document avec vos annotations LaTeX et formes (⌘E)")
                 .keyboardShortcut("e", modifiers: .command)
                 
                 Button(action: {
@@ -65,15 +65,30 @@ struct ContentView: View {
                 }) {
                     Label("Actualiser", systemImage: "arrow.clockwise")
                 }
-                .help("Actualiser (⌘R)")
+                .help("Actualiser l'application (⌘R)")
                 .keyboardShortcut("r", modifiers: .command)
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .openFileRequested)) { _ in
-            webViewStore.triggerOpenFile()
+            openFilePicker()
         }
         .onReceive(NotificationCenter.default.publisher(for: .exportPDFRequested)) { _ in
             webViewStore.exportPDF()
+        }
+    }
+    
+    // Ouvre le sélecteur de fichiers natif de macOS (Finder)
+    private func openFilePicker() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canCreateDirectories = false
+        panel.allowedContentTypes = [.pdf, .png, .jpeg, .image]
+        panel.message = "Sélectionnez votre document PDF ou image sur votre Mac"
+        panel.prompt = "Ouvrir"
+        
+        if panel.runModal() == .OK, let url = panel.url {
+            loadFile(from: url)
         }
     }
     
@@ -94,6 +109,7 @@ struct ContentView: View {
         return true
     }
     
+    // Charge les octets du fichier en mémoire et les injecte via le protocole natif mémoire
     private func loadFile(from url: URL) {
         let isSecured = url.startAccessingSecurityScopedResource()
         defer {
@@ -103,7 +119,7 @@ struct ContentView: View {
         }
         
         guard let data = try? Data(contentsOf: url) else {
-            print("Erreur de lecture du fichier à l'URL:", url)
+            print("Erreur de lecture du fichier:", url)
             return
         }
         
@@ -112,7 +128,7 @@ struct ContentView: View {
         let mimeType = isPDF ? "application/pdf" : "image/\(url.pathExtension.lowercased())"
         
         DispatchQueue.main.async {
-            self.webViewStore.openFileInWebChunked(data: data, filename: filename, mimeType: mimeType)
+            self.webViewStore.openDocument(data: data, filename: filename, mimeType: mimeType)
         }
     }
 }
@@ -121,6 +137,34 @@ struct ContentView: View {
 extension Notification.Name {
     static let openFileRequested = Notification.Name("openFileRequested")
     static let exportPDFRequested = Notification.Name("exportPDFRequested")
+}
+
+// Gestionnaire de schéma d'URL mémoire (doc-asset://) évitant tout dépassement IPC Mach / base64
+class DocSchemeHandler: NSObject, WKURLSchemeHandler {
+    static var currentData: Data?
+    static var currentMime: String = "application/pdf"
+    
+    func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
+        guard let data = DocSchemeHandler.currentData else {
+            urlSchemeTask.didFailWithError(NSError(domain: "DocScheme", code: 404, userInfo: nil))
+            return
+        }
+        let response = HTTPURLResponse(
+            url: urlSchemeTask.request.url!,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: [
+                "Content-Type": DocSchemeHandler.currentMime,
+                "Content-Length": "\(data.count)",
+                "Access-Control-Allow-Origin": "*"
+            ]
+        )!
+        urlSchemeTask.didReceive(response)
+        urlSchemeTask.didReceive(data)
+        urlSchemeTask.didFinish()
+    }
+    
+    func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {}
 }
 
 // Store contrôleur pour WKWebView
@@ -136,6 +180,11 @@ class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKScriptMe
         let contentController = WKUserContentController()
         contentController.add(self, name: "nativeApp")
         config.userContentController = contentController
+        
+        // Enregistre le gestionnaire de protocole natif haute performance
+        let docSchemeHandler = DocSchemeHandler()
+        config.setURLSchemeHandler(docSchemeHandler, forURLScheme: "doc-asset")
+        
         config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
         config.setValue(true, forKey: "allowUniversalAccessFromFileURLs")
         
@@ -153,7 +202,7 @@ class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKScriptMe
     func loadApp() {
         guard let webView = webView else { return }
         
-        // 1. Recherche directe du fichier index.html autonome
+        // 1. Recherche du bundle HTML autonome index.html
         if let bundleUrl = Bundle.main.url(forResource: "index", withExtension: "html") ??
                            Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "dist") {
             if let htmlContent = try? String(contentsOf: bundleUrl, encoding: .utf8) {
@@ -186,66 +235,19 @@ class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKScriptMe
         webView?.reload()
     }
     
-    // Déclenche le sélecteur de fichiers natif macOS via l'input HTML du webview
-    func triggerOpenFile() {
-        let script = "if (window.triggerNativeOpenFile) { window.triggerNativeOpenFile(); }"
+    // Transmet le document à l'interface sans limite de taille
+    func openDocument(data: Data, filename: String, mimeType: String) {
+        DocSchemeHandler.currentData = data
+        DocSchemeHandler.currentMime = mimeType
+        let escapedFilename = filename.replacingOccurrences(of: "'", with: "\\'")
+        let timestamp = Int(Date().timeIntervalSince1970 * 1000)
+        let script = "if (window.loadFromDocScheme) { window.loadFromDocScheme('doc-asset://document/\(escapedFilename)?t=\(timestamp)', '\(escapedFilename)', '\(mimeType)'); }"
         DispatchQueue.main.async {
-            self.webView?.evaluateJavaScript(script, completionHandler: nil)
-        }
-    }
-    
-    // Transfert sécurisé par blocs de 64KB sans jamais dépasser la limite de taille XPC
-    func openFileInWebChunked(data: Data, filename: String, mimeType: String) {
-        let escapedName = filename.replacingOccurrences(of: "'", with: "\\'")
-        let totalBytes = data.count
-        let initScript = "window.nativeFileTransfer = { name: '\(escapedName)', mime: '\(mimeType)', chunks: [] };"
-        
-        webView?.evaluateJavaScript(initScript) { [weak self] _, _ in
-            guard let self = self else { return }
-            let chunkSize = 64 * 1024
-            var offset = 0
-            
-            func sendNextChunk() {
-                guard offset < totalBytes else {
-                    let finalizeScript = """
-                    (function() {
-                        if (!window.nativeFileTransfer) return;
-                        const chunks = window.nativeFileTransfer.chunks;
-                        const blob = new Blob(chunks, { type: window.nativeFileTransfer.mime });
-                        const reader = new FileReader();
-                        reader.onload = function(e) {
-                            if (window.openNativeFile) {
-                                window.openNativeFile(e.target.result, window.nativeFileTransfer.name, window.nativeFileTransfer.mime);
-                            }
-                        };
-                        if (window.nativeFileTransfer.mime.startsWith('image/')) {
-                            reader.readAsDataURL(blob);
-                        } else {
-                            reader.readAsArrayBuffer(blob);
-                        }
-                    })();
-                    """
-                    self.webView?.evaluateJavaScript(finalizeScript, completionHandler: nil)
-                    return
-                }
-                
-                let end = min(offset + chunkSize, totalBytes)
-                let subData = data.subdata(in: offset..<end)
-                let chunkBase64 = subData.base64EncodedString()
-                let chunkScript = """
-                (function() {
-                    const bin = atob('\(chunkBase64)');
-                    const bytes = new Uint8Array(bin.length);
-                    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-                    window.nativeFileTransfer.chunks.push(bytes);
-                })();
-                """
-                offset = end
-                self.webView?.evaluateJavaScript(chunkScript) { _, _ in
-                    sendNextChunk()
+            self.webView?.evaluateJavaScript(script) { _, error in
+                if let error = error {
+                    print("Erreur JavaScript loadFromDocScheme:", error)
                 }
             }
-            sendNextChunk()
         }
     }
     
@@ -257,7 +259,7 @@ class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKScriptMe
     }
     
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        print("Web process terminé de manière inattendue, rechargement automatique...")
+        print("Web process interrompu, rechargement automatique...")
         self.loadApp()
     }
     
@@ -269,8 +271,13 @@ class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKScriptMe
         print("Erreur de navigation provisoire WKWebView:", error)
     }
     
+    // Reçoit les messages provenant de l'interface (ex: clic sur le bouton Ouvrir dans la barre web)
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        print("Message reçu de l'interface web:", message.body)
+        if message.name == "nativeApp", let body = message.body as? String {
+            if body == "openFileDialog" {
+                NotificationCenter.default.post(name: .openFileRequested, object: nil)
+            }
+        }
     }
 }
 

@@ -1,19 +1,42 @@
 import * as pdfjsLib from 'pdfjs-dist';
-// Import worker as local bundled URL through Vite
-import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+import workerRaw from 'pdfjs-dist/build/pdf.worker.min.mjs?raw';
 import { DocumentPage, LoadedDocument, TextLine } from '../types';
 
-// Configure local PDF.js worker
+// Robust configuration: try Blob URL first, fallback gracefully to in-thread fake worker
 if (typeof window !== 'undefined') {
-  pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
+  try {
+    const blob = new Blob([workerRaw], { type: 'application/javascript' });
+    const blobUrl = URL.createObjectURL(blob);
+    pdfjsLib.GlobalWorkerOptions.workerSrc = blobUrl;
+  } catch (err) {
+    console.warn('Worker blob creation failed, using fake worker:', err);
+    pdfjsLib.GlobalWorkerOptions.workerSrc = '';
+  }
 }
 
 export async function loadPDFDocument(fileData: ArrayBuffer | Uint8Array, filename: string, fileSize: number): Promise<LoadedDocument> {
-  const loadingTask = pdfjsLib.getDocument({
-    data: fileData,
+  const data = fileData instanceof Uint8Array ? fileData : new Uint8Array(fileData);
+
+  let loadingTask = pdfjsLib.getDocument({
+    data,
+    useSystemFonts: true,
+    isEvalSupported: false,
   });
 
-  const pdfDoc = await loadingTask.promise;
+  let pdfDoc: any;
+  try {
+    pdfDoc = await loadingTask.promise;
+  } catch (primaryErr) {
+    console.warn('Primary PDF load attempt failed, retrying with in-thread fake worker:', primaryErr);
+    pdfjsLib.GlobalWorkerOptions.workerSrc = '';
+    loadingTask = pdfjsLib.getDocument({
+      data,
+      useSystemFonts: true,
+      isEvalSupported: false,
+    });
+    pdfDoc = await loadingTask.promise;
+  }
+
   const pageCount = pdfDoc.numPages;
   const pages: DocumentPage[] = [];
 

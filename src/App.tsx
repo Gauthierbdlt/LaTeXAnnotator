@@ -358,6 +358,14 @@ export const App: React.FC = () => {
 
   // Open File (PDF or Image)
   const handleOpenFileClick = () => {
+    if ((window as any).webkit?.messageHandlers?.nativeApp) {
+      try {
+        (window as any).webkit.messageHandlers.nativeApp.postMessage('openFileDialog');
+        return;
+      } catch (e) {
+        console.warn('Native open message failed, falling back to file input:', e);
+      }
+    }
     fileInputRef.current?.click();
   };
 
@@ -390,6 +398,10 @@ export const App: React.FC = () => {
           setFuture([]);
           setIsModified(false);
         };
+        img.onerror = (e) => {
+          console.error('Image decode error:', e);
+          alert(`Impossible d'afficher l'image: ${filename}`);
+        };
         img.src = dataUrl;
       } else {
         // PDF document
@@ -414,8 +426,9 @@ export const App: React.FC = () => {
         setFuture([]);
         setIsModified(false);
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to load file:', err);
+      alert(`Impossible d'ouvrir le document "${filename}": ` + (err?.message || 'Format non reconnu ou fichier corrompu'));
     }
   };
 
@@ -455,10 +468,35 @@ export const App: React.FC = () => {
       handleOpenFileClick();
     };
 
+    (window as any).loadFromDocScheme = async (url: string, filename: string, mimeType: string) => {
+      try {
+        const response = await fetch(url);
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status} ${response.statusText}`);
+        }
+        const isImg = (mimeType && mimeType.startsWith('image/')) || /\.(png|jpe?g|webp)$/i.test(filename);
+        if (isImg) {
+          const blob = await response.blob();
+          const reader = new FileReader();
+          reader.onload = (e) => {
+            processLoadedFile(e.target?.result as string, filename, blob.size, true);
+          };
+          reader.readAsDataURL(blob);
+        } else {
+          const arrayBuffer = await response.arrayBuffer();
+          await processLoadedFile(arrayBuffer, filename, arrayBuffer.byteLength, false);
+        }
+      } catch (err: any) {
+        console.error('Failed to load from doc scheme:', err);
+        alert(`Erreur lors du chargement de "${filename}": ` + (err?.message || err));
+      }
+    };
+
     return () => {
       delete (window as any).openNativeFile;
       delete (window as any).exportNativePDF;
       delete (window as any).triggerNativeOpenFile;
+      delete (window as any).loadFromDocScheme;
     };
   }, [doc, annotations, currentPage]);
 
