@@ -1,6 +1,7 @@
 import SwiftUI
 import WebKit
 import UniformTypeIdentifiers
+import Combine
 
 struct ContentView: View {
     @StateObject private var webViewStore = WebViewStore()
@@ -8,33 +9,36 @@ struct ContentView: View {
     
     var body: some View {
         ZStack {
-            // Fond sombre natif macOS correspondant à la palette d'Aperçu
+            // Fond sombre macOS identique à l'interface d'Aperçu
             Color(red: 0.11, green: 0.11, blue: 0.13)
                 .ignoresSafeArea()
             
-            // WebView affichant la version complète de l'application
+            // WebView intégrée sans re-render intempestif
             MacWebView(store: webViewStore)
                 .ignoresSafeArea()
             
-            // Indicateur visuel lors du glisser-déposer de PDF / image
+            // Indicateur visuel élégant lors du glisser-déposer de PDF / image
             if isTargetedForDrop {
                 RoundedRectangle(cornerRadius: 12)
                     .stroke(Color.blue, lineWidth: 3)
-                    .background(Color.blue.opacity(0.12))
+                    .background(Color.blue.opacity(0.15))
                     .overlay(
-                        VStack(spacing: 8) {
+                        VStack(spacing: 10) {
                             Image(systemName: "doc.badge.plus")
-                                .font(.system(size: 44))
+                                .font(.system(size: 48))
                                 .foregroundColor(.blue)
-                            Text("Déposez votre PDF ou image pour l'ouvrir")
-                                .font(.headline)
+                            Text("Déposez votre document PDF ou image ici")
+                                .font(.title3.bold())
                                 .foregroundColor(.white)
+                            Text("Ouverture instantanée dans Aperçu")
+                                .font(.subheadline)
+                                .foregroundColor(.gray)
                         }
                     )
                     .ignoresSafeArea()
             }
         }
-        .frame(minWidth: 900, minHeight: 650)
+        .frame(minWidth: 960, minHeight: 680)
         .onDrop(of: [.pdf, .image, .fileURL], isTargeted: $isTargetedForDrop) { providers in
             handleDrop(providers: providers)
         }
@@ -43,9 +47,9 @@ struct ContentView: View {
                 Button(action: {
                     openFilePicker()
                 }) {
-                    Label("Ouvrir un fichier", systemImage: "doc.badge.plus")
+                    Label("Ouvrir un document", systemImage: "folder")
                 }
-                .help("Ouvrir un PDF ou une image (⌘O)")
+                .help("Ouvrir un fichier PDF ou image (⌘O)")
                 .keyboardShortcut("o", modifiers: .command)
                 
                 Button(action: {
@@ -53,7 +57,7 @@ struct ContentView: View {
                 }) {
                     Label("Exporter PDF", systemImage: "square.and.arrow.up")
                 }
-                .help("Exporter le document avec annotations (⌘E)")
+                .help("Exporter le document avec annotations LaTeX et formes (⌘E)")
                 .keyboardShortcut("e", modifiers: .command)
                 
                 Button(action: {
@@ -61,7 +65,7 @@ struct ContentView: View {
                 }) {
                     Label("Actualiser", systemImage: "arrow.clockwise")
                 }
-                .help("Actualiser l'application (⌘R)")
+                .help("Actualiser (⌘R)")
                 .keyboardShortcut("r", modifiers: .command)
             }
         }
@@ -73,7 +77,7 @@ struct ContentView: View {
         }
     }
     
-    // Dialogue natif macOS pour ouvrir un fichier (PDF ou image)
+    // Sélecteur de fichiers macOS avec accès complet
     private func openFilePicker() {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = false
@@ -106,61 +110,81 @@ struct ContentView: View {
     }
     
     private func loadFile(from url: URL) {
-        guard let data = try? Data(contentsOf: url) else { return }
+        let isSecured = url.startAccessingSecurityScopedResource()
+        defer {
+            if isSecured {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+        
+        guard let data = try? Data(contentsOf: url) else {
+            print("Erreur de lecture du fichier à l'URL:", url)
+            return
+        }
+        
         let base64 = data.base64EncodedString()
         let filename = url.lastPathComponent
         let isPDF = url.pathExtension.lowercased() == "pdf"
         let mimeType = isPDF ? "application/pdf" : "image/\(url.pathExtension.lowercased())"
         let dataUrl = "data:\(mimeType);base64,\(base64)"
         
-        webViewStore.openFileInWeb(dataUrl: dataUrl, filename: filename, mimeType: mimeType)
+        DispatchQueue.main.async {
+            self.webViewStore.openFileInWeb(dataUrl: dataUrl, filename: filename, mimeType: mimeType)
+        }
     }
 }
 
-// Notification keys pour le menu système macOS
+// Notification keys pour la barre de menu macOS (Fichier > Ouvrir...)
 extension Notification.Name {
     static let openFileRequested = Notification.Name("openFileRequested")
     static let exportPDFRequested = Notification.Name("exportPDFRequested")
 }
 
-// Store pour communiquer avec la WKWebView
+// Store contrôleur pour WKWebView sans publication pendant les passes SwiftUI
 class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKScriptMessageHandler {
     var webView: WKWebView?
     
-    func setupWebView() -> WKWebView {
+    func getOrCreateWebView() -> WKWebView {
+        if let existing = webView {
+            return existing
+        }
+        
         let config = WKWebViewConfiguration()
         let contentController = WKUserContentController()
         contentController.add(self, name: "nativeApp")
         config.userContentController = contentController
         config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
+        config.setValue(true, forKey: "allowUniversalAccessFromFileURLs")
         
         let wv = WKWebView(frame: .zero, configuration: config)
         wv.navigationDelegate = self
-        wv.setValue(false, forKey: "drawsBackground") // fond transparent sans flash blanc
+        wv.setValue(false, forKey: "drawsBackground")
         self.webView = wv
         
-        loadApp()
+        DispatchQueue.main.async {
+            self.loadApp()
+        }
         return wv
     }
     
     func loadApp() {
         guard let webView = webView else { return }
         
-        // 1. Essai de chargement du bundle local dist/index.html inclus dans l'app
+        // 1. Bundle local dist/index.html empaqueté dans l'application
         if let bundleUrl = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "dist") {
             let distFolder = bundleUrl.deletingLastPathComponent()
             webView.loadFileURL(bundleUrl, allowingReadAccessTo: distFolder)
             return
         }
         
-        // 2. Recherche récursive du fichier index.html dans le Bundle
+        // 2. Recherche récursive du fichier index.html dans le paquet d'application
         if let fallbackUrl = Bundle.main.url(forResource: "index", withExtension: "html") {
             let parentFolder = fallbackUrl.deletingLastPathComponent()
             webView.loadFileURL(fallbackUrl, allowingReadAccessTo: parentFolder)
             return
         }
         
-        // 3. Mode développement : connexion au serveur local si actif
+        // 3. Mode développement si le serveur local est actif
         if let localDevUrl = URL(string: "http://localhost:3000") {
             webView.load(URLRequest(url: localDevUrl))
         }
@@ -171,27 +195,35 @@ class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKScriptMe
     }
     
     func openFileInWeb(dataUrl: String, filename: String, mimeType: String) {
-        let script = "if (window.openNativeFile) { window.openNativeFile('\(dataUrl)', '\(filename)', '\(mimeType)'); }"
-        webView?.evaluateJavaScript(script, completionHandler: nil)
+        let escapedFilename = filename.replacingOccurrences(of: "'", with: "\\'")
+        let script = "if (window.openNativeFile) { window.openNativeFile('\(dataUrl)', '\(escapedFilename)', '\(mimeType)'); }"
+        DispatchQueue.main.async {
+            self.webView?.evaluateJavaScript(script) { _, error in
+                if let error = error {
+                    print("Erreur JavaScript lors de l'ouverture du document:", error)
+                }
+            }
+        }
     }
     
     func exportPDF() {
         let script = "if (window.exportNativePDF) { window.exportNativePDF(); }"
-        webView?.evaluateJavaScript(script, completionHandler: nil)
+        DispatchQueue.main.async {
+            self.webView?.evaluateJavaScript(script, completionHandler: nil)
+        }
     }
     
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        // Communication de la WebApp vers macOS
-        print("Message reçu de l'app web:", message.body)
+        print("Message reçu de l'interface web:", message.body)
     }
 }
 
-// Wrapper SwiftUI pour WKWebView AppKit
+// Composant SwiftUI représentant la WKWebView
 struct MacWebView: NSViewRepresentable {
-    @ObservedObject var store: WebViewStore
+    let store: WebViewStore
     
     func makeNSView(context: Context) -> WKWebView {
-        return store.setupWebView()
+        return store.getOrCreateWebView()
     }
     
     func updateNSView(_ nsView: WKWebView, context: Context) {}

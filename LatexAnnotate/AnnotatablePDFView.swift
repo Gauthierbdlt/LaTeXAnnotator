@@ -27,7 +27,7 @@ public class AnnotatablePDFView: PDFView {
     }
     
     // MARK: - Gestion du Collage (⌘V)
-    @objc public override func paste(_ sender: Any?) {
+    @objc public func paste(_ sender: Any?) {
         let pasteboard = NSPasteboard.general
         
         // 1. Collage d'image depuis le presse-papiers
@@ -35,8 +35,6 @@ public class AnnotatablePDFView: PDFView {
             pasteImageOnCurrentPage(image: image)
             return
         }
-        
-        super.paste(sender)
     }
     
     /// Insère l'image comme calque indépendant au centre de la page active

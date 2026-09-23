@@ -393,7 +393,19 @@ export const App: React.FC = () => {
         img.src = dataUrl;
       } else {
         // PDF document
-        const buffer = typeof data === 'string' ? Uint8Array.from(atob(data.split(',')[1] || data), c => c.charCodeAt(0)).buffer : data;
+        let buffer: ArrayBuffer;
+        if (typeof data === 'string') {
+          const rawBase64 = data.includes(',') ? data.split(',')[1] : data;
+          const binaryString = atob(rawBase64);
+          const len = binaryString.length;
+          const bytes = new Uint8Array(len);
+          for (let i = 0; i < len; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+          }
+          buffer = bytes.buffer;
+        } else {
+          buffer = data;
+        }
         const loadedPdf = await loadPDFDocument(buffer, filename, fileSize);
         setDoc(loadedPdf);
         setCurrentPage(0);

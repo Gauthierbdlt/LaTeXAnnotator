@@ -1,16 +1,16 @@
 import * as pdfjsLib from 'pdfjs-dist';
+// Import worker as local bundled URL through Vite
+import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { DocumentPage, LoadedDocument, TextLine } from '../types';
 
-// Configure PDF.js worker
+// Configure local PDF.js worker
 if (typeof window !== 'undefined') {
-  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.5.136/build/pdf.worker.min.mjs';
+  pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
 }
 
 export async function loadPDFDocument(fileData: ArrayBuffer | Uint8Array, filename: string, fileSize: number): Promise<LoadedDocument> {
   const loadingTask = pdfjsLib.getDocument({
     data: fileData,
-    cMapUrl: 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.5.136/cmaps/',
-    cMapPacked: true,
   });
 
   const pdfDoc = await loadingTask.promise;
@@ -19,7 +19,7 @@ export async function loadPDFDocument(fileData: ArrayBuffer | Uint8Array, filena
 
   for (let pageNum = 1; pageNum <= pageCount; pageNum++) {
     const page = await pdfDoc.getPage(pageNum);
-    // Render at 2x scale for Retina sharpness
+    // Render at 2x scale for crisp Retina display
     const renderScale = 2.0;
     const viewport = page.getViewport({ scale: renderScale });
     const normalViewport = page.getViewport({ scale: 1.0 });
@@ -36,7 +36,7 @@ export async function loadPDFDocument(fileData: ArrayBuffer | Uint8Array, filena
       }).promise;
     }
 
-    // Extract text content for selectable text overlay
+    // Extract text content for selectable text layer
     const textLines: TextLine[] = [];
     try {
       const textContent = await page.getTextContent();
