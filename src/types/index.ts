@@ -149,3 +149,13 @@ export interface LoadedDocument {
   pageCount: number;
   pages: DocumentPage[];
 }
+
+export interface RecentFileItem {
+  id: string;
+  filename: string;
+  fileType: 'pdf' | 'image';
+  fileSize: number;
+  lastOpened: number;
+  pageCount: number;
+}
+

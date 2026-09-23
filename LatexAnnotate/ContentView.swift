@@ -13,7 +13,7 @@ struct ContentView: View {
             Color(red: 0.14, green: 0.14, blue: 0.15)
                 .ignoresSafeArea()
             
-            // Vue WebKit intégrée avec communication native bidirectionnelle
+            // Vue WebKit intégrant l'application avec communication native bidirectionnelle
             MacWebView(store: webViewStore)
                 .ignoresSafeArea()
             
@@ -47,18 +47,26 @@ struct ContentView: View {
                 Button(action: {
                     openFilePicker()
                 }) {
-                    Label("Ouvrir un document", systemImage: "folder")
+                    Label("Ouvrir", systemImage: "folder")
                 }
-                .help("Ouvrir un fichier PDF ou image depuis votre Mac (⌘O)")
+                .help("Ouvrir un document sur votre Mac (⌘O)")
                 .keyboardShortcut("o", modifiers: .command)
                 
                 Button(action: {
                     webViewStore.exportPDF()
                 }) {
-                    Label("Exporter PDF", systemImage: "square.and.arrow.up")
+                    Label("Enregistrer", systemImage: "square.and.arrow.down")
                 }
-                .help("Exporter le document avec vos annotations LaTeX et formes (⌘E)")
-                .keyboardShortcut("e", modifiers: .command)
+                .help("Enregistrer le document annoté (⌘S / ⌘E)")
+                .keyboardShortcut("s", modifiers: .command)
+                
+                Button(action: {
+                    webViewStore.closeDocument()
+                }) {
+                    Label("Fermer", systemImage: "xmark.circle")
+                }
+                .help("Fermer le document actuel (⌘W)")
+                .keyboardShortcut("w", modifiers: .command)
                 
                 Button(action: {
                     webViewStore.reload()
@@ -75,9 +83,12 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .exportPDFRequested)) { _ in
             webViewStore.exportPDF()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .closeDocRequested)) { _ in
+            webViewStore.closeDocument()
+        }
     }
     
-    // Ouvre le sélecteur de fichiers natif de macOS (Finder)
+    // Ouvre le sélecteur natif de fichiers macOS (Finder)
     private func openFilePicker() {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = false
@@ -109,7 +120,7 @@ struct ContentView: View {
         return true
     }
     
-    // Charge les octets du fichier en mémoire et les injecte via le protocole natif mémoire
+    // Charge les octets du fichier en mémoire et les injecte via le protocole natif
     private func loadFile(from url: URL) {
         let isSecured = url.startAccessingSecurityScopedResource()
         defer {
@@ -133,10 +144,11 @@ struct ContentView: View {
     }
 }
 
-// Notification keys pour le menu macOS (Fichier > Ouvrir...)
+// Notification keys pour le menu macOS
 extension Notification.Name {
     static let openFileRequested = Notification.Name("openFileRequested")
     static let exportPDFRequested = Notification.Name("exportPDFRequested")
+    static let closeDocRequested = Notification.Name("closeDocRequested")
 }
 
 // Gestionnaire de schéma d'URL mémoire (doc-asset://) évitant tout dépassement IPC Mach / base64
@@ -170,6 +182,10 @@ class DocSchemeHandler: NSObject, WKURLSchemeHandler {
 // Store contrôleur pour WKWebView
 class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKScriptMessageHandler {
     var webView: WKWebView?
+    
+    // Suivi des morceaux de sauvegarde transmis par l'interface web
+    private var pendingTransfers: [String: [Data]] = [:]
+    private var pendingFilenames: [String: String] = [:]
     
     func getOrCreateWebView() -> WKWebView {
         if let existing = webView {
@@ -235,13 +251,21 @@ class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKScriptMe
         webView?.reload()
     }
     
+    func closeDocument() {
+        let script = "void(window.closeNativeDocument && window.closeNativeDocument());"
+        DispatchQueue.main.async {
+            self.webView?.evaluateJavaScript(script, completionHandler: nil)
+        }
+    }
+    
     // Transmet le document à l'interface sans limite de taille
     func openDocument(data: Data, filename: String, mimeType: String) {
         DocSchemeHandler.currentData = data
         DocSchemeHandler.currentMime = mimeType
         let escapedFilename = filename.replacingOccurrences(of: "'", with: "\\'")
         let timestamp = Int(Date().timeIntervalSince1970 * 1000)
-        let script = "if (window.loadFromDocScheme) { window.loadFromDocScheme('doc-asset://document/\(escapedFilename)?t=\(timestamp)', '\(escapedFilename)', '\(mimeType)'); }"
+        // Utilisation de void(...) pour éviter l'erreur WKErrorDomain Code 5 sur les Promises JavaScript
+        let script = "void(window.loadFromDocScheme && window.loadFromDocScheme('doc-asset://document/\(escapedFilename)?t=\(timestamp)', '\(escapedFilename)', '\(mimeType)'));"
         DispatchQueue.main.async {
             self.webView?.evaluateJavaScript(script) { _, error in
                 if let error = error {
@@ -252,9 +276,41 @@ class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKScriptMe
     }
     
     func exportPDF() {
-        let script = "if (window.exportNativePDF) { window.exportNativePDF(); }"
+        let script = "void(window.exportNativePDF && window.exportNativePDF());"
         DispatchQueue.main.async {
             self.webView?.evaluateJavaScript(script, completionHandler: nil)
+        }
+    }
+    
+    // Boîte de dialogue native macOS pour enregistrer le fichier annoté (Finder)
+    private func presentSavePanel(for data: Data, defaultFilename: String) {
+        let savePanel = NSSavePanel()
+        savePanel.canCreateDirectories = true
+        savePanel.nameFieldStringValue = defaultFilename
+        
+        let ext = (defaultFilename as NSString).pathExtension.lowercased()
+        if ext == "png" {
+            savePanel.allowedContentTypes = [.png]
+        } else {
+            savePanel.allowedContentTypes = [.pdf]
+        }
+        
+        savePanel.title = "Enregistrer le document annoté"
+        savePanel.message = "Choisissez l'emplacement sur votre Mac où sauvegarder votre fichier"
+        savePanel.prompt = "Enregistrer"
+        
+        if savePanel.runModal() == .OK, let targetUrl = savePanel.url {
+            do {
+                try data.write(to: targetUrl)
+                NSSound(named: "Glass")?.play()
+                print("Fichier sauvegardé avec succès à :", targetUrl.path)
+            } catch {
+                let alert = NSAlert()
+                alert.messageText = "Erreur de sauvegarde"
+                alert.informativeText = "Impossible d'enregistrer le fichier : \(error.localizedDescription)"
+                alert.alertStyle = .warning
+                alert.runModal()
+            }
         }
     }
     
@@ -271,11 +327,52 @@ class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKScriptMe
         print("Erreur de navigation provisoire WKWebView:", error)
     }
     
-    // Reçoit les messages provenant de l'interface (ex: clic sur le bouton Ouvrir dans la barre web)
+    // Reçoit les messages provenant de l'interface (clic sur Ouvrir, transfert de fichiers pour sauvegarde)
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        if message.name == "nativeApp", let body = message.body as? String {
-            if body == "openFileDialog" {
+        guard message.name == "nativeApp" else { return }
+        
+        if let bodyStr = message.body as? String {
+            if bodyStr == "openFileDialog" {
                 NotificationCenter.default.post(name: .openFileRequested, object: nil)
+            }
+            return
+        }
+        
+        if let dict = message.body as? [String: Any], let action = dict["action"] as? String {
+            switch action {
+            case "openFileDialog":
+                NotificationCenter.default.post(name: .openFileRequested, object: nil)
+                
+            case "saveFileStart":
+                if let transferId = dict["transferId"] as? String,
+                   let filename = dict["filename"] as? String {
+                    pendingTransfers[transferId] = []
+                    pendingFilenames[transferId] = filename
+                }
+                
+            case "saveFileChunk":
+                if let transferId = dict["transferId"] as? String,
+                   let chunkBase64 = dict["data"] as? String,
+                   let data = Data(base64Encoded: chunkBase64) {
+                    pendingTransfers[transferId]?.append(data)
+                }
+                
+            case "saveFileFinish":
+                if let transferId = dict["transferId"] as? String,
+                   let chunks = pendingTransfers[transferId],
+                   let filename = pendingFilenames[transferId] {
+                    var fullData = Data()
+                    for c in chunks { fullData.append(c) }
+                    pendingTransfers.removeValue(forKey: transferId)
+                    pendingFilenames.removeValue(forKey: transferId)
+                    
+                    DispatchQueue.main.async {
+                        self.presentSavePanel(for: fullData, defaultFilename: filename)
+                    }
+                }
+                
+            default:
+                break
             }
         }
     }

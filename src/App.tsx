@@ -9,7 +9,8 @@ import {
   ShapeAnnotationItem,
   GridMode,
   PageViewMode,
-  PenStrokeItem 
+  PenStrokeItem,
+  RecentFileItem 
 } from './types';
 import { createSampleDocument, createInitialAnnotations } from './utils/sampleData';
 import { exportDocumentAsPDF, downloadBlob, exportPageToCanvas } from './utils/exportUtils';
@@ -23,15 +24,28 @@ import { LatexEditorModal } from './components/LatexEditorModal';
 import { InspectorModal } from './components/InspectorModal';
 import { CompanionModal } from './components/CompanionModal';
 import { CompanionTabletView } from './components/CompanionTabletView';
+import { StartScreen } from './components/StartScreen';
+
+const RECENT_FILES_KEY = 'latex_annotate_recent_files';
 
 export const App: React.FC = () => {
-  // Document state
-  const [doc, setDoc] = useState<LoadedDocument>(() => createSampleDocument());
+  // Document state (starts without demo document so user can open their own files)
+  const [doc, setDoc] = useState<LoadedDocument | null>(null);
   const [currentPage, setCurrentPage] = useState(0);
   const [isModified, setIsModified] = useState(false);
 
+  // Recent files list in localStorage
+  const [recentFiles, setRecentFiles] = useState<RecentFileItem[]>(() => {
+    try {
+      const raw = localStorage.getItem(RECENT_FILES_KEY);
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  });
+
   // Annotations state & Undo/Redo history
-  const [annotations, setAnnotations] = useState<AnyAnnotation[]>(() => createInitialAnnotations());
+  const [annotations, setAnnotations] = useState<AnyAnnotation[]>([]);
   const [history, setHistory] = useState<AnyAnnotation[][]>([]);
   const [future, setFuture] = useState<AnyAnnotation[][]>([]);
 
@@ -317,32 +331,99 @@ export const App: React.FC = () => {
     setIsLatexModalOpen(true);
   };
 
+  // Native file export helper using safe chunking
+  const sendExportToNative = async (bytes: Uint8Array, defaultFilename: string): Promise<boolean> => {
+    const nativeApp = (window as any).webkit?.messageHandlers?.nativeApp;
+    if (!nativeApp) return false;
+
+    const chunkSize = 128 * 1024; // 128KB chunks
+    const totalChunks = Math.ceil(bytes.length / chunkSize);
+    const transferId = 'tx_' + Date.now();
+
+    nativeApp.postMessage({
+      action: 'saveFileStart',
+      transferId,
+      filename: defaultFilename,
+      totalChunks,
+      totalBytes: bytes.length,
+    });
+
+    for (let i = 0; i < totalChunks; i++) {
+      const start = i * chunkSize;
+      const end = Math.min(start + chunkSize, bytes.length);
+      const slice = bytes.subarray(start, end);
+      let binary = '';
+      for (let j = 0; j < slice.length; j++) {
+        binary += String.fromCharCode(slice[j]);
+      }
+      const chunkBase64 = btoa(binary);
+      nativeApp.postMessage({
+        action: 'saveFileChunk',
+        transferId,
+        chunkIndex: i,
+        data: chunkBase64,
+      });
+    }
+
+    nativeApp.postMessage({
+      action: 'saveFileFinish',
+      transferId,
+    });
+
+    return true;
+  };
+
   // Save / Export Actions
   const handleSavePDF = async () => {
+    if (!doc) return;
     try {
       const pdfBytes = await exportDocumentAsPDF(doc, annotations);
+      const defaultFilename = `Apercu_${doc.filename.replace(/\.[^/.]+$/, '')}_annote.pdf`;
+
+      if ((window as any).webkit?.messageHandlers?.nativeApp) {
+        await sendExportToNative(pdfBytes, defaultFilename);
+        setIsModified(false);
+        return;
+      }
+
       const blob = new Blob([new Uint8Array(pdfBytes) as any], { type: 'application/pdf' });
-      downloadBlob(blob, `Apercu_${doc.filename.replace(/\.[^/.]+$/, '')}_annote.pdf`);
+      downloadBlob(blob, defaultFilename);
       setIsModified(false);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Export PDF error:', err);
+      alert('Erreur lors de la sauvegarde du document: ' + (err?.message || err));
     }
   };
 
   const handleExportPNG = async () => {
+    if (!doc) return;
     try {
       const canvas = await exportPageToCanvas(doc, currentPage, annotations);
+      const defaultFilename = `Apercu_${doc.filename.replace(/\.[^/.]+$/, '')}_page${currentPage + 1}.png`;
+
+      if ((window as any).webkit?.messageHandlers?.nativeApp) {
+        const dataUrl = canvas.toDataURL('image/png');
+        const base64 = dataUrl.split(',')[1];
+        const binary = atob(base64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        await sendExportToNative(bytes, defaultFilename);
+        return;
+      }
+
       canvas.toBlob((blob) => {
         if (blob) {
-          downloadBlob(blob, `Apercu_${doc.filename.replace(/\.[^/.]+$/, '')}_page${currentPage + 1}.png`);
+          downloadBlob(blob, defaultFilename);
         }
       });
-    } catch (err) {
+    } catch (err: any) {
       console.error('Export PNG error:', err);
+      alert('Erreur lors de l\'export PNG: ' + (err?.message || err));
     }
   };
 
   const handlePrint = async () => {
+    if (!doc) return;
     try {
       const canvas = await exportPageToCanvas(doc, currentPage, annotations);
       const dataUrl = canvas.toDataURL('image/png');
@@ -367,6 +448,17 @@ export const App: React.FC = () => {
       }
     }
     fileInputRef.current?.click();
+  };
+
+  const updateRecentFiles = (item: RecentFileItem) => {
+    setRecentFiles((prev) => {
+      const filtered = prev.filter((f) => f.filename !== item.filename);
+      const next = [item, ...filtered].slice(0, 10);
+      try {
+        localStorage.setItem(RECENT_FILES_KEY, JSON.stringify(next));
+      } catch {}
+      return next;
+    });
   };
 
   const processLoadedFile = async (data: ArrayBuffer | string, filename: string, fileSize: number, isImage: boolean) => {
@@ -397,6 +489,15 @@ export const App: React.FC = () => {
           setHistory([]);
           setFuture([]);
           setIsModified(false);
+
+          updateRecentFiles({
+            id: `rec-${Date.now()}`,
+            filename,
+            fileType: 'image',
+            fileSize,
+            lastOpened: Date.now(),
+            pageCount: 1,
+          });
         };
         img.onerror = (e) => {
           console.error('Image decode error:', e);
@@ -425,6 +526,15 @@ export const App: React.FC = () => {
         setHistory([]);
         setFuture([]);
         setIsModified(false);
+
+        updateRecentFiles({
+          id: `rec-${Date.now()}`,
+          filename,
+          fileType: 'pdf',
+          fileSize,
+          lastOpened: Date.now(),
+          pageCount: loadedPdf.pageCount,
+        });
       }
     } catch (err: any) {
       console.error('Failed to load file:', err);
@@ -468,6 +578,10 @@ export const App: React.FC = () => {
       handleOpenFileClick();
     };
 
+    (window as any).closeNativeDocument = () => {
+      setDoc(null);
+    };
+
     (window as any).loadFromDocScheme = async (url: string, filename: string, mimeType: string) => {
       try {
         const response = await fetch(url);
@@ -496,6 +610,7 @@ export const App: React.FC = () => {
       delete (window as any).openNativeFile;
       delete (window as any).exportNativePDF;
       delete (window as any).triggerNativeOpenFile;
+      delete (window as any).closeNativeDocument;
       delete (window as any).loadFromDocScheme;
     };
   }, [doc, annotations, currentPage]);
@@ -526,6 +641,9 @@ export const App: React.FC = () => {
       } else if (isCmdOrCtrl && e.key === 's') {
         e.preventDefault();
         handleSavePDF();
+      } else if (isCmdOrCtrl && e.key === 'w') {
+        e.preventDefault();
+        setDoc(null);
       } else if (isCmdOrCtrl && e.key === 'o') {
         e.preventDefault();
         handleOpenFileClick();
@@ -566,10 +684,10 @@ export const App: React.FC = () => {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleUndo, handleRedo, selectedAnnotationId, currentPage, doc.pageCount]);
+  }, [handleUndo, handleRedo, selectedAnnotationId, currentPage, doc?.pageCount]);
 
   // If in iPad Companion Tablet Mode (drawing board for Apple Pencil)
-  if (isCompanionTabletView) {
+  if (isCompanionTabletView && doc) {
     return (
       <CompanionTabletView
         document={doc}
@@ -591,6 +709,67 @@ export const App: React.FC = () => {
     );
   }
 
+  // If no document is open, show the macOS Start Screen with recent files
+  if (!doc) {
+    return (
+      <div className="h-screen w-screen flex flex-col bg-[#1e1e20] text-gray-200 overflow-hidden font-sans select-none">
+        <input
+          type="file"
+          ref={fileInputRef}
+          onChange={handleFileChange}
+          accept="application/pdf,image/*"
+          className="hidden"
+        />
+
+        {isMenuBarVisible && (
+          <MenuBar
+            onOpenFile={handleOpenFileClick}
+            onSavePDF={() => {}}
+            onExportPNG={() => {}}
+            onPrint={() => {}}
+            onUndo={() => {}}
+            onRedo={() => {}}
+            canUndo={false}
+            canRedo={false}
+            onPasteImageTrigger={() => {}}
+            onInsertLatex={() => {}}
+            onRotateLeft={() => {}}
+            onRotateRight={() => {}}
+            onToggleSidebar={() => {}}
+            onToggleInspector={() => {}}
+            onZoomIn={() => {}}
+            onZoomOut={() => {}}
+            onZoomReset={() => {}}
+            onZoomFit={() => {}}
+            onNextPage={() => {}}
+            onPrevPage={() => {}}
+            filename="Aucun document"
+          />
+        )}
+
+        <StartScreen
+          onOpenFile={handleOpenFileClick}
+          onOpenSample={() => {
+            const sample = createSampleDocument();
+            setDoc(sample);
+            setCurrentPage(0);
+            setAnnotations(createInitialAnnotations());
+            setHistory([]);
+            setFuture([]);
+            setIsModified(false);
+          }}
+          recentFiles={recentFiles}
+          onClearRecentFiles={() => {
+            try {
+              localStorage.removeItem(RECENT_FILES_KEY);
+            } catch {}
+            setRecentFiles([]);
+          }}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="h-screen w-screen flex flex-col bg-[#1e1e20] text-gray-200 overflow-hidden font-sans select-none">
       {/* Hidden file picker */}
@@ -607,6 +786,7 @@ export const App: React.FC = () => {
         <MenuBar
           onOpenFile={handleOpenFileClick}
           onSavePDF={handleSavePDF}
+          onCloseDocument={() => setDoc(null)}
           onExportPNG={handleExportPNG}
           onPrint={handlePrint}
           onUndo={handleUndo}
@@ -657,6 +837,7 @@ export const App: React.FC = () => {
         isInspectorOpen={isInspectorOpen}
         isMenuBarVisible={isMenuBarVisible}
         onOpenFile={handleOpenFileClick}
+        onSavePDF={handleSavePDF}
         onToggleSidebar={() => setIsSidebarOpen((prev) => !prev)}
         onToggleMarkup={() => setIsMarkupOpen((prev) => !prev)}
         onToggleInspector={() => setIsInspectorOpen((prev) => !prev)}

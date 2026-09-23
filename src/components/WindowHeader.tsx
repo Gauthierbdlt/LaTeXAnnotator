@@ -11,7 +11,8 @@ import {
   Search,
   FileText,
   Maximize2,
-  FolderOpen
+  FolderOpen,
+  Download
 } from 'lucide-react';
 
 interface WindowHeaderProps {
@@ -25,6 +26,7 @@ interface WindowHeaderProps {
   isInspectorOpen: boolean;
   isMenuBarVisible?: boolean;
   onOpenFile?: () => void;
+  onSavePDF?: () => void;
   onToggleSidebar: () => void;
   onToggleMarkup: () => void;
   onToggleInspector: () => void;
@@ -48,6 +50,7 @@ export const WindowHeader: React.FC<WindowHeaderProps> = ({
   isInspectorOpen,
   isMenuBarVisible = true,
   onOpenFile,
+  onSavePDF,
   onToggleSidebar,
   onToggleMarkup,
   onToggleInspector,
@@ -108,6 +111,18 @@ export const WindowHeader: React.FC<WindowHeaderProps> = ({
           >
             <FolderOpen className="w-3.5 h-3.5 mr-1.5 text-blue-400" />
             <span>Ouvrir</span>
+          </button>
+        )}
+
+        {/* Save Document Button */}
+        {onSavePDF && (
+          <button
+            onClick={onSavePDF}
+            title="Enregistrer le document annoté (⌘S)"
+            className="h-7 px-2.5 flex items-center justify-center rounded-md border border-[#48484d] bg-[#3a3a3d] hover:bg-[#48484d] text-gray-200 text-xs font-medium transition-colors active:bg-[#2a2a2d] shadow-sm"
+          >
+            <Download className="w-3.5 h-3.5 mr-1.5 text-emerald-400" />
+            <span>Enregistrer</span>
           </button>
         )}
 

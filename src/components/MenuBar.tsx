@@ -3,6 +3,7 @@ import React, { useState, useEffect, useRef } from 'react';
 interface MenuBarProps {
   onOpenFile: () => void;
   onSavePDF: () => void;
+  onCloseDocument?: () => void;
   onExportPNG: () => void;
   onPrint: () => void;
   onUndo: () => void;
@@ -27,6 +28,7 @@ interface MenuBarProps {
 export const MenuBar: React.FC<MenuBarProps> = ({
   onOpenFile,
   onSavePDF,
+  onCloseDocument,
   onExportPNG,
   onPrint,
   onUndo,
@@ -147,6 +149,15 @@ export const MenuBar: React.FC<MenuBarProps> = ({
               <span>Ouvrir...</span>
               <span className="text-gray-400">⌘O</span>
             </button>
+            {onCloseDocument && (
+              <button 
+                className="w-full text-left px-3 py-1 hover:bg-[#3b82f6] hover:text-white flex justify-between"
+                onClick={() => executeAction(onCloseDocument)}
+              >
+                <span>Fermer le document</span>
+                <span className="text-gray-400">⌘W</span>
+              </button>
+            )}
             <div className="my-1 border-t border-[#38383c]" />
             <button 
               className="w-full text-left px-3 py-1 hover:bg-[#3b82f6] hover:text-white flex justify-between"
