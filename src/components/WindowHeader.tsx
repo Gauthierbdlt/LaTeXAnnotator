@@ -10,7 +10,8 @@ import {
   Info, 
   Search,
   FileText,
-  Maximize2
+  Maximize2,
+  FolderOpen
 } from 'lucide-react';
 
 interface WindowHeaderProps {
@@ -23,6 +24,7 @@ interface WindowHeaderProps {
   isMarkupOpen: boolean;
   isInspectorOpen: boolean;
   isMenuBarVisible?: boolean;
+  onOpenFile?: () => void;
   onToggleSidebar: () => void;
   onToggleMarkup: () => void;
   onToggleInspector: () => void;
@@ -45,6 +47,7 @@ export const WindowHeader: React.FC<WindowHeaderProps> = ({
   isMarkupOpen,
   isInspectorOpen,
   isMenuBarVisible = true,
+  onOpenFile,
   onToggleSidebar,
   onToggleMarkup,
   onToggleInspector,
@@ -95,6 +98,18 @@ export const WindowHeader: React.FC<WindowHeaderProps> = ({
           <SidebarIcon className="w-3.5 h-3.5 mr-1.5" />
           <span>Barre latérale</span>
         </button>
+
+        {/* Open Document Button */}
+        {onOpenFile && (
+          <button
+            onClick={onOpenFile}
+            title="Ouvrir un document PDF ou Image (⌘O)"
+            className="h-7 px-2.5 flex items-center justify-center rounded-md border border-[#48484d] bg-[#3a3a3d] hover:bg-[#48484d] text-gray-200 text-xs font-medium transition-colors active:bg-[#2a2a2d] shadow-sm"
+          >
+            <FolderOpen className="w-3.5 h-3.5 mr-1.5 text-blue-400" />
+            <span>Ouvrir</span>
+          </button>
+        )}
 
         {/* Zoom Segmented Control */}
         <div className="flex items-center bg-[#3a3a3d] border border-[#48484d] rounded-md overflow-hidden h-7">

@@ -9,26 +9,26 @@ struct ContentView: View {
     
     var body: some View {
         ZStack {
-            // Fond sombre macOS identique à l'interface d'Aperçu
-            Color(red: 0.11, green: 0.11, blue: 0.13)
+            // Fond sombre macOS correspondant à l'interface d'Aperçu (#242426)
+            Color(red: 0.14, green: 0.14, blue: 0.15)
                 .ignoresSafeArea()
             
-            // WebView intégrée sans re-render intempestif
+            // WebView intégrée affichant la version complète de l'application
             MacWebView(store: webViewStore)
                 .ignoresSafeArea()
             
-            // Indicateur visuel élégant lors du glisser-déposer de PDF / image
+            // Indicateur visuel lors du glisser-déposer de PDF / image
             if isTargetedForDrop {
                 RoundedRectangle(cornerRadius: 12)
                     .stroke(Color.blue, lineWidth: 3)
-                    .background(Color.blue.opacity(0.15))
+                    .background(Color.blue.opacity(0.18))
                     .overlay(
-                        VStack(spacing: 10) {
+                        VStack(spacing: 12) {
                             Image(systemName: "doc.badge.plus")
-                                .font(.system(size: 48))
+                                .font(.system(size: 52))
                                 .foregroundColor(.blue)
                             Text("Déposez votre document PDF ou image ici")
-                                .font(.title3.bold())
+                                .font(.title2.bold())
                                 .foregroundColor(.white)
                             Text("Ouverture instantanée dans Aperçu")
                                 .font(.subheadline)
@@ -38,14 +38,14 @@ struct ContentView: View {
                     .ignoresSafeArea()
             }
         }
-        .frame(minWidth: 960, minHeight: 680)
+        .frame(minWidth: 980, minHeight: 700)
         .onDrop(of: [.pdf, .image, .fileURL], isTargeted: $isTargetedForDrop) { providers in
             handleDrop(providers: providers)
         }
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button(action: {
-                    openFilePicker()
+                    webViewStore.triggerOpenFile()
                 }) {
                     Label("Ouvrir un document", systemImage: "folder")
                 }
@@ -57,7 +57,7 @@ struct ContentView: View {
                 }) {
                     Label("Exporter PDF", systemImage: "square.and.arrow.up")
                 }
-                .help("Exporter le document avec annotations LaTeX et formes (⌘E)")
+                .help("Exporter le document avec annotations (⌘E)")
                 .keyboardShortcut("e", modifiers: .command)
                 
                 Button(action: {
@@ -70,25 +70,10 @@ struct ContentView: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .openFileRequested)) { _ in
-            openFilePicker()
+            webViewStore.triggerOpenFile()
         }
         .onReceive(NotificationCenter.default.publisher(for: .exportPDFRequested)) { _ in
             webViewStore.exportPDF()
-        }
-    }
-    
-    // Sélecteur de fichiers macOS avec accès complet
-    private func openFilePicker() {
-        let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        panel.canCreateDirectories = false
-        panel.allowedContentTypes = [.pdf, .png, .jpeg, .image]
-        panel.message = "Sélectionnez un document PDF ou une image à annoter"
-        panel.prompt = "Ouvrir"
-        
-        if panel.runModal() == .OK, let url = panel.url {
-            loadFile(from: url)
         }
     }
     
@@ -122,25 +107,23 @@ struct ContentView: View {
             return
         }
         
-        let base64 = data.base64EncodedString()
         let filename = url.lastPathComponent
         let isPDF = url.pathExtension.lowercased() == "pdf"
         let mimeType = isPDF ? "application/pdf" : "image/\(url.pathExtension.lowercased())"
-        let dataUrl = "data:\(mimeType);base64,\(base64)"
         
         DispatchQueue.main.async {
-            self.webViewStore.openFileInWeb(dataUrl: dataUrl, filename: filename, mimeType: mimeType)
+            self.webViewStore.openFileInWebChunked(data: data, filename: filename, mimeType: mimeType)
         }
     }
 }
 
-// Notification keys pour la barre de menu macOS (Fichier > Ouvrir...)
+// Notification keys pour le menu macOS (Fichier > Ouvrir...)
 extension Notification.Name {
     static let openFileRequested = Notification.Name("openFileRequested")
     static let exportPDFRequested = Notification.Name("exportPDFRequested")
 }
 
-// Store contrôleur pour WKWebView sans publication pendant les passes SwiftUI
+// Store contrôleur pour WKWebView
 class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKScriptMessageHandler {
     var webView: WKWebView?
     
@@ -170,21 +153,30 @@ class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKScriptMe
     func loadApp() {
         guard let webView = webView else { return }
         
-        // 1. Bundle local dist/index.html empaqueté dans l'application
-        if let bundleUrl = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "dist") {
-            let distFolder = bundleUrl.deletingLastPathComponent()
-            webView.loadFileURL(bundleUrl, allowingReadAccessTo: distFolder)
+        // 1. Recherche directe du fichier index.html autonome
+        if let bundleUrl = Bundle.main.url(forResource: "index", withExtension: "html") ??
+                           Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "dist") {
+            if let htmlContent = try? String(contentsOf: bundleUrl, encoding: .utf8) {
+                webView.loadHTMLString(htmlContent, baseURL: bundleUrl.deletingLastPathComponent())
+                return
+            }
+            webView.loadFileURL(bundleUrl, allowingReadAccessTo: bundleUrl.deletingLastPathComponent())
             return
         }
         
-        // 2. Recherche récursive du fichier index.html dans le paquet d'application
-        if let fallbackUrl = Bundle.main.url(forResource: "index", withExtension: "html") {
-            let parentFolder = fallbackUrl.deletingLastPathComponent()
-            webView.loadFileURL(fallbackUrl, allowingReadAccessTo: parentFolder)
-            return
+        // 2. Recherche récursive de tout fichier HTML dans les ressources
+        if let resPath = Bundle.main.resourcePath,
+           let items = try? FileManager.default.contentsOfDirectory(atPath: resPath) {
+            for item in items where item.hasSuffix(".html") {
+                let fileUrl = URL(fileURLWithPath: resPath).appendingPathComponent(item)
+                if let htmlContent = try? String(contentsOf: fileUrl, encoding: .utf8) {
+                    webView.loadHTMLString(htmlContent, baseURL: fileUrl.deletingLastPathComponent())
+                    return
+                }
+            }
         }
         
-        // 3. Mode développement si le serveur local est actif
+        // 3. Mode dev local si actif
         if let localDevUrl = URL(string: "http://localhost:3000") {
             webView.load(URLRequest(url: localDevUrl))
         }
@@ -194,15 +186,66 @@ class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKScriptMe
         webView?.reload()
     }
     
-    func openFileInWeb(dataUrl: String, filename: String, mimeType: String) {
-        let escapedFilename = filename.replacingOccurrences(of: "'", with: "\\'")
-        let script = "if (window.openNativeFile) { window.openNativeFile('\(dataUrl)', '\(escapedFilename)', '\(mimeType)'); }"
+    // Déclenche le sélecteur de fichiers natif macOS via l'input HTML du webview
+    func triggerOpenFile() {
+        let script = "if (window.triggerNativeOpenFile) { window.triggerNativeOpenFile(); }"
         DispatchQueue.main.async {
-            self.webView?.evaluateJavaScript(script) { _, error in
-                if let error = error {
-                    print("Erreur JavaScript lors de l'ouverture du document:", error)
+            self.webView?.evaluateJavaScript(script, completionHandler: nil)
+        }
+    }
+    
+    // Transfert sécurisé par blocs de 64KB sans jamais dépasser la limite de taille XPC
+    func openFileInWebChunked(data: Data, filename: String, mimeType: String) {
+        let escapedName = filename.replacingOccurrences(of: "'", with: "\\'")
+        let totalBytes = data.count
+        let initScript = "window.nativeFileTransfer = { name: '\(escapedName)', mime: '\(mimeType)', chunks: [] };"
+        
+        webView?.evaluateJavaScript(initScript) { [weak self] _, _ in
+            guard let self = self else { return }
+            let chunkSize = 64 * 1024
+            var offset = 0
+            
+            func sendNextChunk() {
+                guard offset < totalBytes else {
+                    let finalizeScript = """
+                    (function() {
+                        if (!window.nativeFileTransfer) return;
+                        const chunks = window.nativeFileTransfer.chunks;
+                        const blob = new Blob(chunks, { type: window.nativeFileTransfer.mime });
+                        const reader = new FileReader();
+                        reader.onload = function(e) {
+                            if (window.openNativeFile) {
+                                window.openNativeFile(e.target.result, window.nativeFileTransfer.name, window.nativeFileTransfer.mime);
+                            }
+                        };
+                        if (window.nativeFileTransfer.mime.startsWith('image/')) {
+                            reader.readAsDataURL(blob);
+                        } else {
+                            reader.readAsArrayBuffer(blob);
+                        }
+                    })();
+                    """
+                    self.webView?.evaluateJavaScript(finalizeScript, completionHandler: nil)
+                    return
+                }
+                
+                let end = min(offset + chunkSize, totalBytes)
+                let subData = data.subdata(in: offset..<end)
+                let chunkBase64 = subData.base64EncodedString()
+                let chunkScript = """
+                (function() {
+                    const bin = atob('\(chunkBase64)');
+                    const bytes = new Uint8Array(bin.length);
+                    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+                    window.nativeFileTransfer.chunks.push(bytes);
+                })();
+                """
+                offset = end
+                self.webView?.evaluateJavaScript(chunkScript) { _, _ in
+                    sendNextChunk()
                 }
             }
+            sendNextChunk()
         }
     }
     
@@ -211,6 +254,19 @@ class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKScriptMe
         DispatchQueue.main.async {
             self.webView?.evaluateJavaScript(script, completionHandler: nil)
         }
+    }
+    
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        print("Web process terminé de manière inattendue, rechargement automatique...")
+        self.loadApp()
+    }
+    
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        print("Erreur de navigation WKWebView:", error)
+    }
+    
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        print("Erreur de navigation provisoire WKWebView:", error)
     }
     
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {

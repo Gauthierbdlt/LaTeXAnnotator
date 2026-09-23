@@ -618,6 +618,7 @@ export const App: React.FC = () => {
         isMarkupOpen={isMarkupOpen}
         isInspectorOpen={isInspectorOpen}
         isMenuBarVisible={isMenuBarVisible}
+        onOpenFile={handleOpenFileClick}
         onToggleSidebar={() => setIsSidebarOpen((prev) => !prev)}
         onToggleMarkup={() => setIsMarkupOpen((prev) => !prev)}
         onToggleInspector={() => setIsInspectorOpen((prev) => !prev)}
