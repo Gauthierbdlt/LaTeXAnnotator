@@ -1,0 +1,8 @@
+{
+  "name": "Aperçu LaTeX & Images",
+  "description": "Clone parfait de l'application native macOS Aperçu (Preview) avec visionneuse PDF/Images fluide, collage d'images en calques manipulables et annotations LaTeX vectorielles en temps réel.",
+  "permissions": [],
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
